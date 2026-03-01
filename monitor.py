@@ -19,15 +19,15 @@ class SpreadMonitor:
                 'name': 'ЗОЛОТО',
                 'symbol': 'GOLD',
                 'spot_url': 'https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF',
-                'futures_symbol': 'GOLD-6.25',  # Пробуем разные варианты
-                'futures_alt_symbols': ['GOLD', 'GOLDF', 'GOLD-12.24', 'GOLD-3.25', 'GOLD-6.25']  # Запасные
+                'futures_symbol': 'GOLD-6.25',
+                'futures_alt_symbols': ['GOLD', 'GOLDF', 'GOLD-12.24', 'GOLD-3.25', 'GOLD-6.25', 'GOLD-9.25']
             },
             {
                 'name': 'ПАЛЛАДИЙ',
                 'symbol': 'PALLAD',
                 'spot_url': 'https://query1.finance.yahoo.com/v8/finance/chart/PA%3DF',
                 'futures_symbol': 'PALLAD-6.25',
-                'futures_alt_symbols': ['PALLAD', 'PALLADF', 'PALLAD-12.24', 'PALLAD-3.25', 'PALLAD-6.25']
+                'futures_alt_symbols': ['PALLAD', 'PALLADF', 'PALLAD-12.24', 'PALLAD-3.25', 'PALLAD-6.25', 'PALLAD-9.25']
             }
         ]
         
@@ -54,7 +54,7 @@ class SpreadMonitor:
                 'parser': self._parse_exchangerate_usd
             },
             {
-                'name': 'MOEX',  # MOEX в конце, так как часто глючит
+                'name': 'MOEX',
                 'url': 'https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json',
                 'parser': self._parse_moex_usd
             }
@@ -75,14 +75,28 @@ class SpreadMonitor:
     # ========== ПАРСЕРЫ КУРСА ДОЛЛАРА ==========
     
     async def _parse_yahoo_usd(self, data: Dict) -> Optional[float]:
-        """Парсит курс с Yahoo Finance"""
+        """Парсит курс с Yahoo Finance через quote"""
         try:
+            # Пробуем новый способ через quote
             if 'chart' in data and 'result' in data['chart']:
                 result = data['chart']['result']
                 if result and len(result) > 0:
+                    # Пробуем через indicators
+                    if 'indicators' in result[0] and 'quote' in result[0]['indicators']:
+                        quote = result[0]['indicators']['quote']
+                        if quote and len(quote) > 0:
+                            if 'close' in quote[0] and quote[0]['close']:
+                                # Берем последнее закрытие
+                                prices = quote[0]['close']
+                                if prices and len(prices) > 0:
+                                    rate = float(prices[-1])
+                                    if 50 < rate < 150:
+                                        return rate
+                    
+                    # Запасной вариант через meta
                     if 'meta' in result[0] and 'regularMarketPrice' in result[0]['meta']:
                         rate = float(result[0]['meta']['regularMarketPrice'])
-                        if 50 < rate < 150:  # Проверка на реалистичность
+                        if 50 < rate < 150:
                             return rate
             return None
         except Exception as e:
@@ -126,30 +140,22 @@ class SpreadMonitor:
             return None
 
     async def _parse_moex_usd(self, data: Dict) -> Optional[float]:
-        """Парсит курс доллара с MOEX правильно"""
+        """Парсит курс доллара с MOEX"""
         try:
-            # Проверяем структуру ответа MOEX
-            if 'marketdata' not in data:
+            if 'marketdata' not in data or 'data' not in data['marketdata']:
                 return None
                 
-            marketdata = data['marketdata']
-            if 'data' not in marketdata:
-                return None
-                
-            data_rows = marketdata['data']
+            data_rows = data['marketdata']['data']
             if not data_rows or len(data_rows) == 0:
                 return None
             
-            # В MOEX данные могут быть в разных местах
-            # Ищем цену в разных индексах
             for row in data_rows:
-                if len(row) > 20:  # Достаточно длинная строка
-                    # Пробуем разные индексы где может быть цена
-                    for idx in [12, 10, 8, 4]:  # LAST, CLOSE, OPEN, ...
+                if len(row) > 20:
+                    for idx in [12, 10, 8, 4]:
                         if idx < len(row) and row[idx] is not None:
                             try:
                                 price = float(row[idx])
-                                if 50 < price < 150:  # Реалистичный курс
+                                if 50 < price < 150:
                                     return price
                             except:
                                 continue
@@ -161,10 +167,9 @@ class SpreadMonitor:
     async def get_usd_rub_rate(self, session: aiohttp.ClientSession) -> Optional[float]:
         """Пробует получить курс доллара из 5 источников"""
         
-        # Проверяем, не обновляли ли курс в последние 5 минут
         if self.last_usd_rub and self.last_usd_rub_time:
             age = (datetime.now() - self.last_usd_rub_time).seconds
-            if age < 300:  # 5 минут
+            if age < 300:
                 logging.info(f"Использую кэшированный курс: {self.last_usd_rub}")
                 return self.last_usd_rub
         
@@ -201,84 +206,95 @@ class SpreadMonitor:
 
     # ========== ПОЛУЧЕНИЕ ЦЕН МЕТАЛЛОВ ==========
     
-    async def get_yahoo_price(self, session: aiohttp.ClientSession, url: str) -> Optional[float]:
-        """Получает цену металла с Yahoo Finance"""
+    async def get_yahoo_price(self, session: aiohttp.ClientSession, url: str, metal_name: str) -> Optional[float]:
+        """Получает цену металла с Yahoo Finance через quote"""
         try:
             headers = {'User-Agent': 'Mozilla/5.0'}
             async with session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     
-                    # Парсим ответ Yahoo
+                    # Парсим ответ Yahoo через indicators
                     if 'chart' in data and 'result' in data['chart']:
                         result = data['chart']['result']
                         if result and len(result) > 0:
+                            # Основной способ через quote
+                            if 'indicators' in result[0] and 'quote' in result[0]['indicators']:
+                                quote = result[0]['indicators']['quote']
+                                if quote and len(quote) > 0:
+                                    if 'close' in quote[0] and quote[0]['close']:
+                                        prices = quote[0]['close']
+                                        if prices and len(prices) > 0:
+                                            price = float(prices[-1])
+                                            # Проверка реалистичности
+                                            if 'GOLD' in url and price > 1000:
+                                                logging.info(f"✅ {metal_name} спот (через quote): ${price}")
+                                                return price
+                                            if 'PALLAD' in url and price > 500:
+                                                logging.info(f"✅ {metal_name} спот (через quote): ${price}")
+                                                return price
+                            
+                            # Запасной способ через meta
                             if 'meta' in result[0] and 'regularMarketPrice' in result[0]['meta']:
                                 price = float(result[0]['meta']['regularMarketPrice'])
-                                # Проверка для золота (должно быть > 1000)
                                 if 'GOLD' in url and price > 1000:
+                                    logging.info(f"✅ {metal_name} спот (через meta): ${price}")
                                     return price
-                                # Для палладия (> 500)
                                 if 'PALLAD' in url and price > 500:
+                                    logging.info(f"✅ {metal_name} спот (через meta): ${price}")
                                     return price
                     
-                    logging.error(f"Не удалось найти цену в ответе Yahoo")
+                    logging.error(f"❌ Не удалось найти цену {metal_name} в ответе Yahoo")
                     return None
                 else:
-                    logging.error(f"Yahoo вернул статус {resp.status}")
+                    logging.error(f"Yahoo вернул статус {resp.status} для {metal_name}")
                     return None
         except Exception as e:
-            logging.error(f"Ошибка Yahoo Finance: {e}")
+            logging.error(f"Ошибка Yahoo Finance для {metal_name}: {e}")
             return None
 
     async def get_moex_futures_price(self, session: aiohttp.ClientSession, asset: Dict) -> Optional[float]:
         """Получает цену фьючерса с MOEX, пробуя разные тикеры"""
         
-        # Пробуем все возможные тикеры
         symbols_to_try = [asset['futures_symbol']] + asset.get('futures_alt_symbols', [])
+        symbols_to_try = list(dict.fromkeys(symbols_to_try))  # Убираем дубликаты
         
         for symbol in symbols_to_try:
             try:
                 url = f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/forts/securities/{symbol}.json"
-                logging.info(f"Пробую тикер MOEX: {symbol}")
+                logging.info(f"Пробую тикер MOEX для {asset['name']}: {symbol}")
                 
                 async with session.get(url, timeout=10) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         
-                        # Проверяем наличие данных
                         if 'marketdata' in data and 'data' in data['marketdata']:
                             marketdata = data['marketdata']['data']
                             if marketdata and len(marketdata) > 0:
-                                # Берем первую строку
                                 first_row = marketdata[0]
                                 
-                                # Пробуем разные индексы для цены
-                                for idx in [12, 10, 8, 4]:  # LAST, CLOSE, OPEN, ...
+                                for idx in [12, 10, 8, 4]:
                                     if idx < len(first_row) and first_row[idx] is not None:
                                         try:
                                             price = float(first_row[idx])
                                             
-                                            # Проверяем реалистичность цены
-                                            if 'GOLD' in symbol and 100000 < price < 500000:
-                                                logging.info(f"✅ Найдена цена GOLD по тикеру {symbol}: {price}")
+                                            if 'GOLD' in asset['symbol'] and 100000 < price < 500000:
+                                                logging.info(f"✅ {asset['name']} фьючерс по {symbol}: {price} RUB")
                                                 return price
-                                            elif 'PALLAD' in symbol and 50000 < price < 300000:
-                                                logging.info(f"✅ Найдена цена PALLAD по тикеру {symbol}: {price}")
+                                            elif 'PALLAD' in asset['symbol'] and 50000 < price < 300000:
+                                                logging.info(f"✅ {asset['name']} фьючерс по {symbol}: {price} RUB")
                                                 return price
                                         except:
                                             continue
-                                
-                                logging.warning(f"Тикер {symbol} не содержит цены")
                             else:
-                                logging.warning(f"Тикер {symbol} не найден")
+                                logging.warning(f"Тикер {symbol} не найден или пуст")
                     else:
                         logging.warning(f"MOEX вернул {resp.status} для {symbol}")
                         
             except Exception as e:
                 logging.warning(f"Ошибка при запросе {symbol}: {e}")
             
-            await asyncio.sleep(0.5)  # Небольшая пауза между запросами
+            await asyncio.sleep(0.5)
         
         logging.error(f"❌ Не удалось найти фьючерс для {asset['name']}")
         return None
@@ -297,7 +313,7 @@ class SpreadMonitor:
                 }
             
             # 2. Получаем спот цену с Yahoo
-            spot_price_usd = await self.get_yahoo_price(session, asset['spot_url'])
+            spot_price_usd = await self.get_yahoo_price(session, asset['spot_url'], asset['name'])
             if not spot_price_usd:
                 return {
                     'name': asset['name'],
@@ -322,7 +338,7 @@ class SpreadMonitor:
             # 5. Считаем спред
             spread = ((futures_price_usd - spot_price_usd) / spot_price_usd) * 100
             
-            return {
+            result = {
                 'name': asset['name'],
                 'symbol': asset['symbol'],
                 'spot_usd': round(spot_price_usd, 2),
@@ -332,6 +348,9 @@ class SpreadMonitor:
                 'spread': round(spread, 2),
                 'timestamp': datetime.now().isoformat()
             }
+            
+            logging.info(f"✅ Успешно получены данные для {asset['name']}: спред {spread:.2f}%")
+            return result
             
         except Exception as e:
             logging.error(f"Ошибка получения данных для {asset['name']}: {e}")
@@ -352,7 +371,6 @@ class SpreadMonitor:
                 tasks = [self.get_prices(session, asset) for asset in self.assets]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Фильтруем результаты
             valid_results = []
             error_results = []
             
@@ -365,11 +383,10 @@ class SpreadMonitor:
                         valid_results.append(r)
                         self.current_spreads[r['name']] = r
             
-            # Проверяем пороги только для успешных результатов
             if valid_results:
                 await self.check_thresholds(valid_results)
+                logging.info(f"✅ Успешно получены данные для {len(valid_results)} активов")
             
-            # Если все активы с ошибками, логируем
             if error_results and len(error_results) == len(self.assets):
                 logging.error("❌ ВСЕ АКТИВЫ С ОШИБКАМИ!")
                 
