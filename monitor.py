@@ -13,40 +13,55 @@ class SpreadMonitor:
         self.threshold = 2.0
         self.check_interval = 60
         
-        # АКТИВЫ
+        # АКТИВЫ С ФОРЕКС ИСТОЧНИКАМИ
         self.assets = [
             {
                 'name': 'ЗОЛОТО',
-                'symbol': 'GOLD',
+                'symbol': 'XAUUSD',
                 'spot_apis': [
                     {
-                        'name': 'MetalPriceAPI',
-                        'url': 'https://api.metalpriceapi.com/v1/latest?base=USD&currencies=XAU',
-                        'parser': self._parse_metalprice
+                        'name': 'FXEmpire',
+                        'url': 'https://www.fxempire.com/api/v1/en/markets/xau-usd/chart',
+                        'parser': self._parse_fxempire
+                    },
+                    {
+                        'name': 'FXStreet',
+                        'url': 'https://www.fxstreet.com/api/rates/real-time/XAUUSD',
+                        'parser': self._parse_fxstreet
                     }
                 ],
                 'futures_symbol': 'GOLD-6.25',
-                'futures_alt': ['GOLD', 'GOLD-12.24', 'GOLD-3.25', 'GOLDF']
+                'futures_alt': ['GOLD', 'GOLD-12.24', 'GOLD-3.25']
             },
             {
                 'name': 'ПАЛЛАДИЙ',
-                'symbol': 'XPD',
+                'symbol': 'XPDUSD',
                 'spot_apis': [
                     {
-                        'name': 'MetalPriceAPI',
-                        'url': 'https://api.metalpriceapi.com/v1/latest?base=USD&currencies=XPD',
-                        'parser': self._parse_metalprice
+                        'name': 'FXEmpire',
+                        'url': 'https://www.fxempire.com/api/v1/en/markets/xpd-usd/chart',
+                        'parser': self._parse_fxempire
+                    },
+                    {
+                        'name': 'FXStreet',
+                        'url': 'https://www.fxstreet.com/api/rates/real-time/XPDUSD',
+                        'parser': self._parse_fxstreet
                     }
                 ],
                 'futures_symbol': 'PALLAD-6.25',
-                'futures_alt': ['PALLAD', 'PALLAD-12.24', 'PALLAD-3.25', 'PALLADF']
+                'futures_alt': ['PALLAD', 'PALLAD-12.24', 'PALLAD-3.25']
             }
         ]
         
-        # ИСТОЧНИКИ КУРСА
+        # ИСТОЧНИКИ КУРСА USD/RUB
         self.usd_rub_sources = [
             {
-                'name': 'ExchangeRate-API',
+                'name': 'CBR',
+                'url': 'https://www.cbr-xml-daily.ru/daily_json.js',
+                'parser': self._parse_cbr
+            },
+            {
+                'name': 'ExchangeRate',
                 'url': 'https://api.exchangerate-api.com/v4/latest/USD',
                 'parser': self._parse_exchangerate
             },
@@ -63,10 +78,33 @@ class SpreadMonitor:
         self.last_usd_rub = None
         self.last_usd_rub_time = None
         
-        logging.info(f"SpreadMonitor инициализирован")
+        logging.info("✅ SpreadMonitor инициализирован")
+
+    # ========== ПАРСЕРЫ ФОРЕКС ==========
+    
+    async def _parse_fxempire(self, data: Dict) -> Optional[float]:
+        """Парсит FXEmpire"""
+        try:
+            return float(data['current']['price'])
+        except:
+            return None
+
+    async def _parse_fxstreet(self, data: Dict) -> Optional[float]:
+        """Парсит FXStreet"""
+        try:
+            return float(data['last'])
+        except:
+            return None
 
     # ========== ПАРСЕРЫ КУРСА ==========
     
+    async def _parse_cbr(self, data: Dict) -> Optional[float]:
+        """Парсит курс ЦБ РФ"""
+        try:
+            return float(data['Valute']['USD']['Value'])
+        except:
+            return None
+
     async def _parse_exchangerate(self, data: Dict) -> Optional[float]:
         """Парсит ExchangeRate-API"""
         try:
@@ -78,18 +116,6 @@ class SpreadMonitor:
         """Парсит CurrencyAPI"""
         try:
             return float(data['rates']['RUB'])
-        except:
-            return None
-
-    # ========== ПАРСЕРЫ МЕТАЛЛОВ ==========
-    
-    async def _parse_metalprice(self, data: Dict) -> Optional[float]:
-        """Парсит MetalPriceAPI"""
-        try:
-            if 'rates' in data:
-                for key, value in data['rates'].items():
-                    return float(value)
-            return None
         except:
             return None
 
@@ -105,60 +131,48 @@ class SpreadMonitor:
         
         for source in self.usd_rub_sources:
             try:
-                logging.info(f"Пробую курс из {source['name']}...")
                 async with session.get(source['url'], headers=headers, timeout=10) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         rate = await source['parser'](data)
                         if rate and 50 < rate < 150:
-                            logging.info(f"✅ Курс: {rate}")
                             self.last_usd_rub = rate
                             self.last_usd_rub_time = datetime.now()
                             return rate
             except:
                 continue
         
-        logging.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ КУРС")
         return None
 
     async def get_spot_price(self, session: aiohttp.ClientSession, asset: Dict) -> Optional[float]:
-        """Получает спот цену металла"""
+        """Получает спот цену с форекса"""
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        
         for api in asset['spot_apis']:
             try:
-                logging.info(f"Пробую {asset['name']} из {api['name']}...")
-                async with session.get(api['url'], timeout=10) as resp:
+                async with session.get(api['url'], headers=headers, timeout=10) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         price = await api['parser'](data)
                         
                         if price:
-                            # Проверяем реалистичность
-                            if asset['name'] == 'ЗОЛОТО' and 2000 < price < 4000:
-                                logging.info(f"✅ {asset['name']}: ${price}")
+                            # Проверка реалистичности
+                            if 'XAU' in asset['symbol'] and 2000 < price < 4000:
                                 return price
-                            elif asset['name'] == 'ПАЛЛАДИЙ' and 700 < price < 1300:
-                                logging.info(f"✅ {asset['name']}: ${price}")
+                            elif 'XPD' in asset['symbol'] and 700 < price < 1300:
                                 return price
-                            else:
-                                logging.warning(f"Странная цена {asset['name']}: ${price}")
-                                return None
-                    else:
-                        logging.warning(f"{api['name']} статус {resp.status}")
-            except Exception as e:
-                logging.warning(f"Ошибка {api['name']}: {e}")
+            except:
+                continue
         
-        logging.error(f"❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ {asset['name']}")
         return None
 
     async def get_futures_price(self, session: aiohttp.ClientSession, asset: Dict) -> Optional[float]:
         """Получает цену фьючерса с MOEX"""
-        
         symbols = [asset['futures_symbol']] + asset.get('futures_alt', [])
         
         for symbol in symbols:
             try:
                 url = f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/forts/securities/{symbol}.json"
-                logging.info(f"Пробую фьючерс {symbol}...")
                 
                 async with session.get(url, timeout=10) as resp:
                     if resp.status == 200:
@@ -167,20 +181,16 @@ class SpreadMonitor:
                         if 'marketdata' in data and 'data' in data['marketdata']:
                             rows = data['marketdata']['data']
                             if rows and len(rows) > 0:
-                                for idx in [12, 10, 8, 4]:
+                                for idx in [12, 10, 8]:
                                     if idx < len(rows[0]) and rows[0][idx]:
                                         price = float(rows[0][idx])
-                                        # Проверяем реалистичность
-                                        if asset['name'] == 'ЗОЛОТО' and 200000 < price < 400000:
-                                            logging.info(f"✅ {symbol}: {price} RUB")
+                                        if 'GOLD' in asset['symbol'] and 200000 < price < 400000:
                                             return price
-                                        elif asset['name'] == 'ПАЛЛАДИЙ' and 50000 < price < 200000:
-                                            logging.info(f"✅ {symbol}: {price} RUB")
+                                        elif 'PALLAD' in asset['symbol'] and 50000 < price < 200000:
                                             return price
-            except Exception as e:
-                logging.warning(f"Ошибка {symbol}: {e}")
+            except:
+                continue
         
-        logging.error(f"❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ ФЬЮЧЕРС {asset['name']}")
         return None
 
     async def check_prices(self):
@@ -196,19 +206,16 @@ class SpreadMonitor:
             # Получаем курс
             usd_rub = await self.get_usd_rub(session)
             if not usd_rub:
-                logging.error("❌ НЕТ КУРСА - ПРОПУСКАЕМ ЦИКЛ")
                 return
-            
-            logging.info(f"💱 Курс USD/RUB: {usd_rub}")
             
             for asset in self.assets:
                 try:
-                    # Спот
+                    # Спот с форекса
                     spot = await self.get_spot_price(session, asset)
                     if not spot:
                         continue
                     
-                    # Фьючерс
+                    # Фьючерс с MOEX
                     futures_rub = await self.get_futures_price(session, asset)
                     if not futures_rub:
                         continue
@@ -220,7 +227,6 @@ class SpreadMonitor:
                     # Сохраняем
                     self.current_spreads[asset['name']] = {
                         'name': asset['name'],
-                        'symbol': asset['symbol'],
                         'spot_usd': round(spot, 2),
                         'futures_rub': round(futures_rub, 2),
                         'futures_usd': round(futures_usd, 2),
@@ -228,44 +234,39 @@ class SpreadMonitor:
                         'spread': round(spread, 2)
                     }
                     
-                    logging.info(f"📊 {asset['name']}: спред {spread:.2f}%")
-                    
                     # Проверяем порог
                     if abs(spread) > self.threshold:
-                        await self.notify_users(users, self.current_spreads[asset['name']])
+                        await self._notify_users(users, self.current_spreads[asset['name']])
                         
                 except Exception as e:
-                    logging.error(f"Ошибка обработки {asset['name']}: {e}")
+                    continue
 
-    async def notify_users(self, users: List[int], data: Dict):
+    async def _notify_users(self, users: List[int], data: Dict):
         """Отправляет уведомление"""
         emoji = "🟢" if data['spread'] > 0 else "🔴"
         
         msg = (
             f"{emoji} <b>{data['name']}</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"📈 Спред: <b>{data['spread']:.2f}%</b>\n"
-            f"💰 Спот: ${data['spot_usd']:,.2f}\n"
-            f"💎 Фьюч: {data['futures_rub']:,.2f} RUB\n"
-            f"💱 Курс: {data['usd_rub']}\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+            f"📈 Спред: {data['spread']:.2f}%\n"
+            f"💰 Спот: ${data['spot_usd']}\n"
+            f"💎 Фьюч: {data['futures_rub']} RUB\n"
+            f"💱 Курс: {data['usd_rub']}"
         )
         
         for user_id in users:
             try:
                 await self.bot.send_message(user_id, msg, parse_mode="HTML")
-                logging.info(f"✅ Уведомление отправлено {user_id}")
             except:
                 continue
 
     async def get_current_spreads(self) -> str:
         """Текущие спреды"""
         if not self.current_spreads:
-            return "📊 Данные загружаются..."
+            return "📊 Нет данных"
         
-        lines = ["📊 <b>Текущие спреды:</b>\n"]
+        lines = ["📊 Текущие спреды:\n"]
         for name, data in self.current_spreads.items():
-            lines.append(f"{name}: <b>{data['spread']:.2f}%</b>")
+            lines.append(f"{name}: {data['spread']:.2f}%")
             lines.append(f"   Спот: ${data['spot_usd']}")
             lines.append(f"   Фьюч: {data['futures_rub']} RUB")
             lines.append("")
@@ -273,11 +274,11 @@ class SpreadMonitor:
         return "\n".join(lines)
 
     async def start_monitoring(self):
-        """Запуск"""
-        logging.info("Мониторинг запущен")
+        """Запуск мониторинга"""
+        logging.info("🚀 Мониторинг запущен")
         while True:
             try:
                 await self.check_prices()
-            except Exception as e:
-                logging.error(f"Ошибка в цикле: {e}")
+            except:
+                pass
             await asyncio.sleep(self.check_interval)
