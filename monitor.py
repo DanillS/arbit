@@ -10,7 +10,7 @@ class SpreadMonitor:
     def __init__(self, bot, database):
         self.bot = bot
         self.db = database
-        self.threshold = 1.5  # Порог в процентах
+        self.threshold = 0.1  # Порог в процентах
         self.check_interval = 60  # Проверка каждые 60 секунд
         
         # Список отслеживаемых пар
