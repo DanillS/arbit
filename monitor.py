@@ -56,7 +56,7 @@ class SpreadMonitor:
     def __init__(self, bot, database):
         self.bot = bot
         self.db = database
-        self.threshold = 2.0
+        self.threshold = 0.1
         self.check_interval = 60
         
         self.assets = [
