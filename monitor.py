@@ -8,19 +8,9 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message
 from dotenv import load_dotenv
-import fcntl
 import aiohttp
 import ssl
 import certifi
-
-# ====== ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА ======
-lock_file = '/tmp/bot.lock'
-try:
-    lock_fd = open(lock_file, 'w')
-    fcntl.lockf(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except:
-    print("❌ Бот уже запущен!")
-    sys.exit(1)
 
 # ====== НАСТРОЙКА ЛОГИРОВАНИЯ ======
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -106,6 +96,7 @@ class SpreadMonitor:
         
         logger.info("✅ SpreadMonitor инициализирован")
 
+    # ✅ ВАЖНО: ЭТОТ МЕТОД НУЖЕН ДЛЯ /start
     def get_assets_names(self):
         """Возвращает список названий активов"""
         return [asset['name'] for asset in self.assets]
@@ -275,6 +266,7 @@ monitor = SpreadMonitor(bot, db)
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     db.add_user(message.from_user.id)
+    # ✅ ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЙ МЕТОД
     assets_list = "\n".join([f"• {name}" for name in monitor.get_assets_names()])
     await message.answer(
         f"🚀 Бот запущен!\n\n"
