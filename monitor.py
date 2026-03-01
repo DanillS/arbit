@@ -1,63 +1,20 @@
 import os
-import sys
 import logging
 import asyncio
 import json
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message
-from dotenv import load_dotenv
 import aiohttp
 import ssl
 import certifi
 
-# ====== НАСТРОЙКА ЛОГИРОВАНИЯ ======
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ====== ЗАГРУЗКА ПЕРЕМЕННЫХ ======
-load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
-
-# ====== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ======
-USERS_FILE = "users.json"
-
-class UserDatabase:
-    def __init__(self):
-        self.users = self.load_users()
-        logger.info(f"✅ Загружено {len(self.users)} пользователей")
-
-    def load_users(self):
-        try:
-            if os.path.exists(USERS_FILE):
-                with open(USERS_FILE, 'r') as f:
-                    data = json.load(f)
-                    return set(data.get('users', []))
-        except:
-            pass
-        return set()
-
-    def save_users(self):
-        with open(USERS_FILE, 'w') as f:
-            json.dump({'users': list(self.users)}, f)
-
-    def add_user(self, user_id: int):
-        if user_id not in self.users:
-            self.users.add(user_id)
-            self.save_users()
-            logger.info(f"✅ Новый пользователь: {user_id}")
-
-    def get_all_users(self):
-        return list(self.users)
-
-# ====== МОНИТОРИНГ СПРЕДОВ ======
 class SpreadMonitor:
     def __init__(self, bot, database):
         self.bot = bot
         self.db = database
-        self.threshold = 0.1
-        self.check_interval = 60
+        self.threshold = 2.0  # Порог спреда 2%
+        self.check_interval = 60  # Проверка каждую минуту
         
         self.assets = [
             {
@@ -96,7 +53,6 @@ class SpreadMonitor:
         
         logger.info("✅ SpreadMonitor инициализирован")
 
-    # ✅ ВАЖНО: ЭТОТ МЕТОД НУЖЕН ДЛЯ /start
     def get_assets_names(self):
         """Возвращает список названий активов"""
         return [asset['name'] for asset in self.assets]
@@ -122,10 +78,10 @@ class SpreadMonitor:
     async def get_usd_rub(self, session):
         if self.last_usd_rub and self.last_usd_rub_time:
             age = (datetime.now() - self.last_usd_rub_time).seconds
-            if age < 300:
+            if age < 300:  # Кэш на 5 минут
                 return self.last_usd_rub
         
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
         for source in self.usd_rub_sources:
             try:
@@ -136,25 +92,30 @@ class SpreadMonitor:
                         if rate and 50 < rate < 150:
                             self.last_usd_rub = rate
                             self.last_usd_rub_time = datetime.now()
+                            logger.info(f"Курс USD/RUB: {rate}")
                             return rate
-            except:
+            except Exception as e:
+                logger.error(f"Ошибка получения курса из {source['name']}: {e}")
                 continue
         return None
 
     async def get_spot_price(self, session, asset):
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         try:
             async with session.get(asset['spot_url'], headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     price = await self._parse_fxempire(data)
                     if price:
+                        # Проверка на разумные цены
                         if 'XAU' in asset['symbol'] and 2000 < price < 4000:
+                            logger.info(f"Спот {asset['name']}: ${price}")
                             return price
                         elif 'XPD' in asset['symbol'] and 700 < price < 1300:
+                            logger.info(f"Спот {asset['name']}: ${price}")
                             return price
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка получения спота {asset['name']}: {e}")
         return None
 
     async def get_futures_price(self, session, asset):
@@ -169,21 +130,30 @@ class SpreadMonitor:
                         if 'marketdata' in data and 'data' in data['marketdata']:
                             rows = data['marketdata']['data']
                             if rows and len(rows) > 0:
+                                # Пробуем разные индексы для цены
                                 for idx in [12, 10, 8]:
                                     if idx < len(rows[0]) and rows[0][idx]:
                                         price = float(rows[0][idx])
+                                        # Проверка на разумные цены в рублях
                                         if 'GOLD' in asset['symbol'] and 200000 < price < 400000:
+                                            logger.info(f"Фьючерс {asset['name']}: {price} RUB")
                                             return price
                                         elif 'PALLAD' in asset['symbol'] and 50000 < price < 200000:
+                                            logger.info(f"Фьючерс {asset['name']}: {price} RUB")
                                             return price
-            except:
+            except Exception as e:
+                logger.error(f"Ошибка получения фьючерса {symbol}: {e}")
                 continue
         return None
 
     async def check_prices(self):
+        """Проверяет цены и отправляет уведомления"""
         users = self.db.get_all_users()
         if not users:
+            logger.info("Нет подписанных пользователей")
             return
+        
+        logger.info("Проверка цен...")
         
         ssl_context = ssl.create_default_context(cafile=certifi.where())
         connector = aiohttp.TCPConnector(ssl=ssl_context)
@@ -191,20 +161,25 @@ class SpreadMonitor:
         async with aiohttp.ClientSession(connector=connector) as session:
             usd_rub = await self.get_usd_rub(session)
             if not usd_rub:
+                logger.error("Не удалось получить курс USD/RUB")
                 return
             
             for asset in self.assets:
                 try:
                     spot = await self.get_spot_price(session, asset)
                     if not spot:
+                        logger.warning(f"Не удалось получить спот для {asset['name']}")
                         continue
                     
                     futures_rub = await self.get_futures_price(session, asset)
                     if not futures_rub:
+                        logger.warning(f"Не удалось получить фьючерс для {asset['name']}")
                         continue
                     
                     futures_usd = futures_rub / usd_rub
                     spread = ((futures_usd - spot) / spot) * 100
+                    
+                    logger.info(f"{asset['name']}: спред {spread:.2f}%")
                     
                     self.current_spreads[asset['name']] = {
                         'name': asset['name'],
@@ -214,90 +189,57 @@ class SpreadMonitor:
                         'spread': round(spread, 2)
                     }
                     
+                    # Проверяем порог и отправляем уведомления
                     if abs(spread) > self.threshold:
-                        await self._notify_users(users, self.current_spreads[asset['name']])
-                except:
+                        # Проверяем, не отправляли ли уже уведомление за последние 30 минут
+                        last_alert = self.last_alerts.get(asset['name'])
+                        if not last_alert or (datetime.now() - last_alert).seconds > 1800:
+                            await self._notify_users(users, self.current_spreads[asset['name']])
+                            self.last_alerts[asset['name']] = datetime.now()
+                            
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке {asset['name']}: {e}")
                     continue
 
     async def _notify_users(self, users, data):
+        """Отправляет уведомления всем пользователям"""
         emoji = "🟢" if data['spread'] > 0 else "🔴"
         msg = (
             f"{emoji} <b>{data['name']}</b>\n"
             f"📈 Спред: {data['spread']:.2f}%\n"
             f"💰 Спот: ${data['spot_usd']}\n"
             f"💎 Фьюч: {data['futures_rub']} RUB\n"
-            f"💱 Курс: {data['usd_rub']}"
+            f"💱 Курс: {data['usd_rub']} RUB/USD"
         )
         
         for user_id in users:
             try:
                 await self.bot.send_message(user_id, msg, parse_mode="HTML")
-            except:
-                continue
+                logger.info(f"Уведомление отправлено пользователю {user_id}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
 
     async def get_current_spreads(self):
+        """Возвращает текущие спреды для команды /status"""
         if not self.current_spreads:
-            return "📊 Нет данных"
+            return "📊 Нет данных о спредах. Попробуйте позже."
         
-        lines = ["📊 Текущие спреды:\n"]
+        lines = ["📊 <b>Текущие спреды:</b>\n"]
         for name, data in self.current_spreads.items():
-            lines.append(f"{name}: {data['spread']:.2f}%")
-            lines.append(f"   Спот: ${data['spot_usd']}")
-            lines.append(f"   Фьюч: {data['futures_rub']} RUB")
+            emoji = "🟢" if data['spread'] > 0 else "🔴"
+            lines.append(f"{emoji} <b>{name}</b>: {data['spread']:.2f}%")
+            lines.append(f"   💰 Спот: ${data['spot_usd']}")
+            lines.append(f"   💎 Фьюч: {data['futures_rub']} RUB")
+            lines.append(f"   💱 Курс: {data['usd_rub']} RUB/USD")
             lines.append("")
         return "\n".join(lines)
 
     async def start_monitoring(self):
+        """Запускает бесконечный цикл мониторинга"""
         logger.info("🚀 Мониторинг запущен")
         while True:
             try:
                 await self.check_prices()
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка в цикле мониторинга: {e}")
             await asyncio.sleep(self.check_interval)
-
-# ====== ИНИЦИАЛИЗАЦИЯ ======
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
-db = UserDatabase()
-monitor = SpreadMonitor(bot, db)
-
-# ====== КОМАНДЫ ======
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    db.add_user(message.from_user.id)
-    # ✅ ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЙ МЕТОД
-    assets_list = "\n".join([f"• {name}" for name in monitor.get_assets_names()])
-    await message.answer(
-        f"🚀 Бот запущен!\n\n"
-        f"📊 Отслеживаемые активы:\n{assets_list}\n\n"
-        f"📈 Команды:\n"
-        f"/status - текущие спреды\n"
-        f"/help - помощь"
-    )
-
-@dp.message(Command("status"))
-async def cmd_status(message: Message):
-    status = await monitor.get_current_spreads()
-    await message.answer(status, parse_mode="HTML")
-
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    await message.answer(
-        "📚 Доступные команды:\n"
-        "/start - запустить бота\n"
-        "/status - текущие спреды\n"
-        "/help - эта справка"
-    )
-
-# ====== ЗАПУСК ======
-async def main():
-    asyncio.create_task(monitor.start_monitoring())
-    logger.info("🚀 Бот запускается...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен")
