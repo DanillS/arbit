@@ -13,19 +13,21 @@ class SpreadMonitor:
         self.threshold = 2.0  # Порог в процентах
         self.check_interval = 60  # Проверка каждые 60 секунд
         
-        # СПИСОК ОТСЛЕЖИВАЕМЫХ АКТИВОВ (металлы)
+        # СПИСОК ОТСЛЕЖИВАЕМЫХ АКТИВОВ (металлы) с правильными тикерами
         self.assets = [
             {
                 'name': 'ЗОЛОТО',
                 'symbol': 'GOLD',
                 'spot_url': 'https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF',
-                'futures_symbol': 'GOLD-6.25'
+                'futures_symbol': 'GOLD-6.25',  # Пробуем разные варианты
+                'futures_alt_symbols': ['GOLD', 'GOLDF', 'GOLD-12.24', 'GOLD-3.25', 'GOLD-6.25']  # Запасные
             },
             {
                 'name': 'ПАЛЛАДИЙ',
                 'symbol': 'PALLAD',
                 'spot_url': 'https://query1.finance.yahoo.com/v8/finance/chart/PA%3DF',
-                'futures_symbol': 'PALLAD-6.25'
+                'futures_symbol': 'PALLAD-6.25',
+                'futures_alt_symbols': ['PALLAD', 'PALLADF', 'PALLAD-12.24', 'PALLAD-3.25', 'PALLAD-6.25']
             }
         ]
         
@@ -35,11 +37,6 @@ class SpreadMonitor:
                 'name': 'Yahoo Finance',
                 'url': 'https://query1.finance.yahoo.com/v8/finance/chart/USDRUB=X',
                 'parser': self._parse_yahoo_usd
-            },
-            {
-                'name': 'MOEX',
-                'url': 'https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json',
-                'parser': self._parse_moex_usd
             },
             {
                 'name': 'CBR (ЦБ РФ)',
@@ -55,6 +52,11 @@ class SpreadMonitor:
                 'name': 'ExchangeRate-API',
                 'url': 'https://api.exchangerate-api.com/v4/latest/USD',
                 'parser': self._parse_exchangerate_usd
+            },
+            {
+                'name': 'MOEX',  # MOEX в конце, так как часто глючит
+                'url': 'https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json',
+                'parser': self._parse_moex_usd
             }
         ]
         
@@ -75,53 +77,25 @@ class SpreadMonitor:
     async def _parse_yahoo_usd(self, data: Dict) -> Optional[float]:
         """Парсит курс с Yahoo Finance"""
         try:
-            if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
-                result = data['chart']['result'][0]
-                if 'meta' in result and 'regularMarketPrice' in result['meta']:
-                    return float(result['meta']['regularMarketPrice'])
+            if 'chart' in data and 'result' in data['chart']:
+                result = data['chart']['result']
+                if result and len(result) > 0:
+                    if 'meta' in result[0] and 'regularMarketPrice' in result[0]['meta']:
+                        rate = float(result[0]['meta']['regularMarketPrice'])
+                        if 50 < rate < 150:  # Проверка на реалистичность
+                            return rate
             return None
         except Exception as e:
             logging.debug(f"Ошибка парсинга Yahoo USD: {e}")
-            return None
-
-    async def _parse_moex_usd(self, data: Dict) -> Optional[float]:
-        """Парсит курс доллара с MOEX правильно"""
-        try:
-            # Проверяем структуру ответа
-            if 'marketdata' not in data:
-                return None
-                
-            marketdata = data['marketdata']
-            if 'data' not in marketdata:
-                return None
-                
-            data_rows = marketdata['data']
-            if not data_rows or len(data_rows) == 0:
-                return None
-            
-            # Берем первую строку данных
-            first_row = data_rows[0]
-            
-            # В MOEX цена последней сделки обычно в индексе 12
-            if len(first_row) > 12:
-                price = float(first_row[12])
-                # Проверяем, что цена реалистичная (не 8 миллионов)
-                if 50 < price < 150:  # Нормальный курс доллара
-                    return price
-                else:
-                    logging.warning(f"MOEX вернул странный курс: {price}, пропускаем")
-                    return None
-            
-            return None
-        except Exception as e:
-            logging.error(f"Ошибка парсинга MOEX: {e}")
             return None
 
     async def _parse_cbr_usd(self, data: Dict) -> Optional[float]:
         """Парсит курс с ЦБ РФ"""
         try:
             if 'Valute' in data and 'USD' in data['Valute']:
-                return float(data['Valute']['USD']['Value'])
+                rate = float(data['Valute']['USD']['Value'])
+                if 50 < rate < 150:
+                    return rate
             return None
         except Exception as e:
             logging.debug(f"Ошибка парсинга ЦБ: {e}")
@@ -132,7 +106,7 @@ class SpreadMonitor:
         try:
             if 'rates' in data and 'RUB' in data['rates']:
                 rate = float(data['rates']['RUB'])
-                if 50 < rate < 150:  # Проверка на реалистичность
+                if 50 < rate < 150:
                     return rate
             return None
         except Exception as e:
@@ -144,11 +118,44 @@ class SpreadMonitor:
         try:
             if 'rates' in data and 'RUB' in data['rates']:
                 rate = float(data['rates']['RUB'])
-                if 50 < rate < 150:  # Проверка на реалистичность
+                if 50 < rate < 150:
                     return rate
             return None
         except Exception as e:
             logging.debug(f"Ошибка парсинга ExchangeRate: {e}")
+            return None
+
+    async def _parse_moex_usd(self, data: Dict) -> Optional[float]:
+        """Парсит курс доллара с MOEX правильно"""
+        try:
+            # Проверяем структуру ответа MOEX
+            if 'marketdata' not in data:
+                return None
+                
+            marketdata = data['marketdata']
+            if 'data' not in marketdata:
+                return None
+                
+            data_rows = marketdata['data']
+            if not data_rows or len(data_rows) == 0:
+                return None
+            
+            # В MOEX данные могут быть в разных местах
+            # Ищем цену в разных индексах
+            for row in data_rows:
+                if len(row) > 20:  # Достаточно длинная строка
+                    # Пробуем разные индексы где может быть цена
+                    for idx in [12, 10, 8, 4]:  # LAST, CLOSE, OPEN, ...
+                        if idx < len(row) and row[idx] is not None:
+                            try:
+                                price = float(row[idx])
+                                if 50 < price < 150:  # Реалистичный курс
+                                    return price
+                            except:
+                                continue
+            return None
+        except Exception as e:
+            logging.error(f"Ошибка парсинга MOEX: {e}")
             return None
 
     async def get_usd_rub_rate(self, session: aiohttp.ClientSession) -> Optional[float]:
@@ -187,10 +194,9 @@ class SpreadMonitor:
             except Exception as e:
                 logging.warning(f"Ошибка при получении курса из {source['name']}: {e}")
             
-            await asyncio.sleep(1)  # Пауза между запросами
+            await asyncio.sleep(1)
         
-        # Если ни один источник не сработал
-        logging.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ КУРС ДОЛЛАРА НИ ИЗ ОДНОГО ИСТОЧНИКА")
+        logging.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ КУРС ДОЛЛАРА")
         return None
 
     # ========== ПОЛУЧЕНИЕ ЦЕН МЕТАЛЛОВ ==========
@@ -204,62 +210,78 @@ class SpreadMonitor:
                     data = await resp.json()
                     
                     # Парсим ответ Yahoo
-                    if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
-                        result = data['chart']['result'][0]
-                        if 'meta' in result and 'regularMarketPrice' in result['meta']:
-                            return float(result['meta']['regularMarketPrice'])
+                    if 'chart' in data and 'result' in data['chart']:
+                        result = data['chart']['result']
+                        if result and len(result) > 0:
+                            if 'meta' in result[0] and 'regularMarketPrice' in result[0]['meta']:
+                                price = float(result[0]['meta']['regularMarketPrice'])
+                                # Проверка для золота (должно быть > 1000)
+                                if 'GOLD' in url and price > 1000:
+                                    return price
+                                # Для палладия (> 500)
+                                if 'PALLAD' in url and price > 500:
+                                    return price
                     
-                    logging.error(f"Неожиданный формат ответа Yahoo: {list(data.keys())}")
+                    logging.error(f"Не удалось найти цену в ответе Yahoo")
                     return None
                 else:
-                    logging.error(f"Yahoo вернул статус {resp.status} для {url}")
+                    logging.error(f"Yahoo вернул статус {resp.status}")
                     return None
         except Exception as e:
             logging.error(f"Ошибка Yahoo Finance: {e}")
             return None
 
-    async def get_moex_futures_price(self, session: aiohttp.ClientSession, security: str) -> Optional[float]:
-        """Получает цену фьючерса с MOEX"""
-        try:
-            url = f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/forts/securities/{security}.json"
-            
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    
-                    # Проверяем структуру ответа
-                    if 'marketdata' not in data or 'data' not in data['marketdata']:
-                        logging.error(f"MOEX: нет marketdata для {security}")
-                        return None
-                    
-                    marketdata = data['marketdata']['data']
-                    if not marketdata or len(marketdata) == 0:
-                        logging.error(f"MOEX: пустые данные для {security}")
-                        return None
-                    
-                    # Берем первую строку
-                    first_row = marketdata[0]
-                    
-                    # Цена последней сделки в индексе 12
-                    if len(first_row) > 12 and first_row[12] is not None:
-                        price = float(first_row[12])
-                        # Проверяем, что цена реалистичная
-                        if security.startswith('GOLD') and 100000 < price < 500000:
-                            return price
-                        elif security.startswith('PALLAD') and 50000 < price < 300000:
-                            return price
-                        else:
-                            logging.warning(f"MOEX: странная цена для {security}: {price}")
-                            return None
+    async def get_moex_futures_price(self, session: aiohttp.ClientSession, asset: Dict) -> Optional[float]:
+        """Получает цену фьючерса с MOEX, пробуя разные тикеры"""
+        
+        # Пробуем все возможные тикеры
+        symbols_to_try = [asset['futures_symbol']] + asset.get('futures_alt_symbols', [])
+        
+        for symbol in symbols_to_try:
+            try:
+                url = f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/forts/securities/{symbol}.json"
+                logging.info(f"Пробую тикер MOEX: {symbol}")
+                
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        
+                        # Проверяем наличие данных
+                        if 'marketdata' in data and 'data' in data['marketdata']:
+                            marketdata = data['marketdata']['data']
+                            if marketdata and len(marketdata) > 0:
+                                # Берем первую строку
+                                first_row = marketdata[0]
+                                
+                                # Пробуем разные индексы для цены
+                                for idx in [12, 10, 8, 4]:  # LAST, CLOSE, OPEN, ...
+                                    if idx < len(first_row) and first_row[idx] is not None:
+                                        try:
+                                            price = float(first_row[idx])
+                                            
+                                            # Проверяем реалистичность цены
+                                            if 'GOLD' in symbol and 100000 < price < 500000:
+                                                logging.info(f"✅ Найдена цена GOLD по тикеру {symbol}: {price}")
+                                                return price
+                                            elif 'PALLAD' in symbol and 50000 < price < 300000:
+                                                logging.info(f"✅ Найдена цена PALLAD по тикеру {symbol}: {price}")
+                                                return price
+                                        except:
+                                            continue
+                                
+                                logging.warning(f"Тикер {symbol} не содержит цены")
+                            else:
+                                logging.warning(f"Тикер {symbol} не найден")
                     else:
-                        logging.error(f"MOEX: нет цены в данных для {security}")
-                        return None
-                else:
-                    logging.error(f"MOEX вернул статус {resp.status} для {security}")
-                    return None
-        except Exception as e:
-            logging.error(f"Ошибка MOEX для {security}: {e}")
-            return None
+                        logging.warning(f"MOEX вернул {resp.status} для {symbol}")
+                        
+            except Exception as e:
+                logging.warning(f"Ошибка при запросе {symbol}: {e}")
+            
+            await asyncio.sleep(0.5)  # Небольшая пауза между запросами
+        
+        logging.error(f"❌ Не удалось найти фьючерс для {asset['name']}")
+        return None
 
     async def get_prices(self, session: aiohttp.ClientSession, asset: Dict) -> Optional[Dict]:
         """Получает цены и считает спред"""
@@ -285,7 +307,7 @@ class SpreadMonitor:
                 }
             
             # 3. Получаем фьючерс цену с MOEX
-            futures_price_rub = await self.get_moex_futures_price(session, asset['futures_symbol'])
+            futures_price_rub = await self.get_moex_futures_price(session, asset)
             if not futures_price_rub:
                 return {
                     'name': asset['name'],
@@ -322,33 +344,37 @@ class SpreadMonitor:
 
     async def check_all_pairs(self):
         """Проверяет все активы"""
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        try:
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
 
-        async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = [self.get_prices(session, asset) for asset in self.assets]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Фильтруем результаты
-        valid_results = []
-        error_results = []
-        
-        for r in results:
-            if isinstance(r, dict):
-                if 'error' in r:
-                    error_results.append(r)
-                    logging.error(f"Ошибка для {r['name']}: {r['error']}")
-                else:
-                    valid_results.append(r)
-                    self.current_spreads[r['name']] = r
-        
-        # Проверяем пороги только для успешных результатов
-        if valid_results:
-            await self.check_thresholds(valid_results)
-        
-        # Если есть ошибки, логируем их
-        if error_results:
-            logging.warning(f"Есть ошибки для {len(error_results)} активов")
+            async with aiohttp.ClientSession(connector=connector) as session:
+                tasks = [self.get_prices(session, asset) for asset in self.assets]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Фильтруем результаты
+            valid_results = []
+            error_results = []
+            
+            for r in results:
+                if isinstance(r, dict):
+                    if 'error' in r:
+                        error_results.append(r)
+                        logging.error(f"Ошибка для {r['name']}: {r['error']}")
+                    else:
+                        valid_results.append(r)
+                        self.current_spreads[r['name']] = r
+            
+            # Проверяем пороги только для успешных результатов
+            if valid_results:
+                await self.check_thresholds(valid_results)
+            
+            # Если все активы с ошибками, логируем
+            if error_results and len(error_results) == len(self.assets):
+                logging.error("❌ ВСЕ АКТИВЫ С ОШИБКАМИ!")
+                
+        except Exception as e:
+            logging.error(f"Критическая ошибка в check_all_pairs: {e}")
 
     async def check_thresholds(self, results: List[Dict]):
         """Проверяет превышение порога"""
