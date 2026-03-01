@@ -10,7 +10,7 @@ class SpreadMonitor:
     def __init__(self, bot, database):
         self.bot = bot
         self.db = database
-        self.threshold = 0.1  # Порог в процентах
+        self.threshold = 2.0  # Порог в процентах
         self.check_interval = 60  # Проверка каждые 60 секунд
         
         # СПИСОК ОТСЛЕЖИВАЕМЫХ АКТИВОВ (металлы)
@@ -32,14 +32,14 @@ class SpreadMonitor:
         # 5 ИСТОЧНИКОВ КУРСА USD/RUB для надежности
         self.usd_rub_sources = [
             {
-                'name': 'MOEX',
-                'url': 'https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json',
-                'parser': self._parse_moex_usd
-            },
-            {
                 'name': 'Yahoo Finance',
                 'url': 'https://query1.finance.yahoo.com/v8/finance/chart/USDRUB=X',
                 'parser': self._parse_yahoo_usd
+            },
+            {
+                'name': 'MOEX',
+                'url': 'https://iss.moex.com/iss/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json',
+                'parser': self._parse_moex_usd
             },
             {
                 'name': 'CBR (ЦБ РФ)',
@@ -72,40 +72,83 @@ class SpreadMonitor:
 
     # ========== ПАРСЕРЫ КУРСА ДОЛЛАРА ==========
     
-    async def _parse_moex_usd(self, data: Dict) -> Optional[float]:
-        """Парсит курс с MOEX"""
-        try:
-            return float(data['marketdata']['data'][0][12])
-        except:
-            return None
-
     async def _parse_yahoo_usd(self, data: Dict) -> Optional[float]:
         """Парсит курс с Yahoo Finance"""
         try:
-            return float(data['chart']['result'][0]['meta']['regularMarketPrice'])
-        except:
+            if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
+                result = data['chart']['result'][0]
+                if 'meta' in result and 'regularMarketPrice' in result['meta']:
+                    return float(result['meta']['regularMarketPrice'])
+            return None
+        except Exception as e:
+            logging.debug(f"Ошибка парсинга Yahoo USD: {e}")
+            return None
+
+    async def _parse_moex_usd(self, data: Dict) -> Optional[float]:
+        """Парсит курс доллара с MOEX правильно"""
+        try:
+            # Проверяем структуру ответа
+            if 'marketdata' not in data:
+                return None
+                
+            marketdata = data['marketdata']
+            if 'data' not in marketdata:
+                return None
+                
+            data_rows = marketdata['data']
+            if not data_rows or len(data_rows) == 0:
+                return None
+            
+            # Берем первую строку данных
+            first_row = data_rows[0]
+            
+            # В MOEX цена последней сделки обычно в индексе 12
+            if len(first_row) > 12:
+                price = float(first_row[12])
+                # Проверяем, что цена реалистичная (не 8 миллионов)
+                if 50 < price < 150:  # Нормальный курс доллара
+                    return price
+                else:
+                    logging.warning(f"MOEX вернул странный курс: {price}, пропускаем")
+                    return None
+            
+            return None
+        except Exception as e:
+            logging.error(f"Ошибка парсинга MOEX: {e}")
             return None
 
     async def _parse_cbr_usd(self, data: Dict) -> Optional[float]:
         """Парсит курс с ЦБ РФ"""
         try:
-            return float(data['Valute']['USD']['Value'])
-        except:
+            if 'Valute' in data and 'USD' in data['Valute']:
+                return float(data['Valute']['USD']['Value'])
+            return None
+        except Exception as e:
+            logging.debug(f"Ошибка парсинга ЦБ: {e}")
             return None
 
     async def _parse_currencies_usd(self, data: Dict) -> Optional[float]:
         """Парсит курс с CurrencyAPI"""
         try:
-            # Там курс RUB за 1 USD
-            return float(data['rates']['RUB'])
-        except:
+            if 'rates' in data and 'RUB' in data['rates']:
+                rate = float(data['rates']['RUB'])
+                if 50 < rate < 150:  # Проверка на реалистичность
+                    return rate
+            return None
+        except Exception as e:
+            logging.debug(f"Ошибка парсинга CurrencyAPI: {e}")
             return None
 
     async def _parse_exchangerate_usd(self, data: Dict) -> Optional[float]:
         """Парсит курс с ExchangeRate-API"""
         try:
-            return float(data['rates']['RUB'])
-        except:
+            if 'rates' in data and 'RUB' in data['rates']:
+                rate = float(data['rates']['RUB'])
+                if 50 < rate < 150:  # Проверка на реалистичность
+                    return rate
+            return None
+        except Exception as e:
+            logging.debug(f"Ошибка парсинга ExchangeRate: {e}")
             return None
 
     async def get_usd_rub_rate(self, session: aiohttp.ClientSession) -> Optional[float]:
@@ -150,7 +193,7 @@ class SpreadMonitor:
         logging.error("❌ НЕ УДАЛОСЬ ПОЛУЧИТЬ КУРС ДОЛЛАРА НИ ИЗ ОДНОГО ИСТОЧНИКА")
         return None
 
-    # ========== ПОЛУЧЕНИЕ ЦЕН ==========
+    # ========== ПОЛУЧЕНИЕ ЦЕН МЕТАЛЛОВ ==========
     
     async def get_yahoo_price(self, session: aiohttp.ClientSession, url: str) -> Optional[float]:
         """Получает цену металла с Yahoo Finance"""
@@ -159,7 +202,15 @@ class SpreadMonitor:
             async with session.get(url, headers=headers, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return float(data['chart']['result'][0]['meta']['regularMarketPrice'])
+                    
+                    # Парсим ответ Yahoo
+                    if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
+                        result = data['chart']['result'][0]
+                        if 'meta' in result and 'regularMarketPrice' in result['meta']:
+                            return float(result['meta']['regularMarketPrice'])
+                    
+                    logging.error(f"Неожиданный формат ответа Yahoo: {list(data.keys())}")
+                    return None
                 else:
                     logging.error(f"Yahoo вернул статус {resp.status} для {url}")
                     return None
@@ -167,14 +218,42 @@ class SpreadMonitor:
             logging.error(f"Ошибка Yahoo Finance: {e}")
             return None
 
-    async def get_moex_price(self, session: aiohttp.ClientSession, security: str) -> Optional[float]:
+    async def get_moex_futures_price(self, session: aiohttp.ClientSession, security: str) -> Optional[float]:
         """Получает цену фьючерса с MOEX"""
         try:
             url = f"https://iss.moex.com/iss/engines/futures/markets/forts/boards/forts/securities/{security}.json"
+            
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return float(data['marketdata']['data'][0][12])
+                    
+                    # Проверяем структуру ответа
+                    if 'marketdata' not in data or 'data' not in data['marketdata']:
+                        logging.error(f"MOEX: нет marketdata для {security}")
+                        return None
+                    
+                    marketdata = data['marketdata']['data']
+                    if not marketdata or len(marketdata) == 0:
+                        logging.error(f"MOEX: пустые данные для {security}")
+                        return None
+                    
+                    # Берем первую строку
+                    first_row = marketdata[0]
+                    
+                    # Цена последней сделки в индексе 12
+                    if len(first_row) > 12 and first_row[12] is not None:
+                        price = float(first_row[12])
+                        # Проверяем, что цена реалистичная
+                        if security.startswith('GOLD') and 100000 < price < 500000:
+                            return price
+                        elif security.startswith('PALLAD') and 50000 < price < 300000:
+                            return price
+                        else:
+                            logging.warning(f"MOEX: странная цена для {security}: {price}")
+                            return None
+                    else:
+                        logging.error(f"MOEX: нет цены в данных для {security}")
+                        return None
                 else:
                     logging.error(f"MOEX вернул статус {resp.status} для {security}")
                     return None
@@ -185,10 +264,9 @@ class SpreadMonitor:
     async def get_prices(self, session: aiohttp.ClientSession, asset: Dict) -> Optional[Dict]:
         """Получает цены и считает спред"""
         try:
-            # СНАЧАЛА получаем курс доллара (это важно!)
+            # 1. Получаем курс доллара
             usd_rub = await self.get_usd_rub_rate(session)
             if not usd_rub:
-                # Если курса нет - возвращаем ошибку
                 return {
                     'name': asset['name'],
                     'symbol': asset['symbol'],
@@ -196,7 +274,7 @@ class SpreadMonitor:
                     'timestamp': datetime.now().isoformat()
                 }
             
-            # Получаем спот цену с Yahoo (доллары)
+            # 2. Получаем спот цену с Yahoo
             spot_price_usd = await self.get_yahoo_price(session, asset['spot_url'])
             if not spot_price_usd:
                 return {
@@ -206,8 +284,8 @@ class SpreadMonitor:
                     'timestamp': datetime.now().isoformat()
                 }
             
-            # Получаем фьючерс цену с MOEX (рубли)
-            futures_price_rub = await self.get_moex_price(session, asset['futures_symbol'])
+            # 3. Получаем фьючерс цену с MOEX
+            futures_price_rub = await self.get_moex_futures_price(session, asset['futures_symbol'])
             if not futures_price_rub:
                 return {
                     'name': asset['name'],
@@ -216,10 +294,10 @@ class SpreadMonitor:
                     'timestamp': datetime.now().isoformat()
                 }
             
-            # Конвертируем фьючерс в доллары
+            # 4. Конвертируем фьючерс в доллары
             futures_price_usd = futures_price_rub / usd_rub
             
-            # Считаем спред в процентах
+            # 5. Считаем спред
             spread = ((futures_price_usd - spot_price_usd) / spot_price_usd) * 100
             
             return {
@@ -253,17 +331,24 @@ class SpreadMonitor:
         
         # Фильтруем результаты
         valid_results = []
+        error_results = []
+        
         for r in results:
             if isinstance(r, dict):
-                valid_results.append(r)
-                # Если есть ошибка - логируем
                 if 'error' in r:
+                    error_results.append(r)
                     logging.error(f"Ошибка для {r['name']}: {r['error']}")
                 else:
+                    valid_results.append(r)
                     self.current_spreads[r['name']] = r
         
-        # Проверяем пороги
-        await self.check_thresholds(valid_results)
+        # Проверяем пороги только для успешных результатов
+        if valid_results:
+            await self.check_thresholds(valid_results)
+        
+        # Если есть ошибки, логируем их
+        if error_results:
+            logging.warning(f"Есть ошибки для {len(error_results)} активов")
 
     async def check_thresholds(self, results: List[Dict]):
         """Проверяет превышение порога"""
@@ -272,10 +357,6 @@ class SpreadMonitor:
             return
         
         for result in results:
-            # Пропускаем результаты с ошибками
-            if 'error' in result:
-                continue
-                
             spread = result.get('spread')
             if spread and abs(spread) > self.threshold:
                 await self.notify_users(users, result)
@@ -332,7 +413,8 @@ class SpreadMonitor:
             spread = data['spread']
             emoji = "✅" if abs(spread) < 2 else "⚠️" if abs(spread) < 3 else "🚨"
             lines.append(f"{emoji} {name}: <b>{spread:.2f}%</b>")
-            lines.append(f"   Спот: ${data['spot_usd']} | Фьюч: {data['futures_rub']} RUB")
+            lines.append(f"   Спот: ${data['spot_usd']:,.2f}")
+            lines.append(f"   Фьючерс: {data['futures_rub']:,.2f} RUB (${data['futures_usd']:,.2f})")
             lines.append(f"   Курс USD/RUB: {data['usd_rub']}")
             lines.append("")
         
