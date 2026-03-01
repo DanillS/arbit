@@ -33,7 +33,7 @@ async def cmd_start(message: Message):
     db.add_user(user_id, username)
     
     # Создаем красивое приветствие с доступными парами
-    pairs_list = "\n".join([f"• {pair}" for pair in monitor.get_available_pairs()])
+    pairs_list = "\n".join([f"• {pair}" for pair in monitor.get_assets_names()])
     
     welcome_text = (
         f"👋 Привет, {message.from_user.first_name}!\n\n"
@@ -48,7 +48,7 @@ async def cmd_start(message: Message):
 # Обработчик команды /pairs - показать доступные пары
 @dp.message(Command("pairs"))
 async def cmd_pairs(message: Message):
-    pairs = monitor.get_available_pairs()
+    pairs = monitor.get_assets_names()
     text = "📊 Отслеживаемые пары:\n" + "\n".join([f"• {pair}" for pair in pairs])
     await message.answer(text)
 
